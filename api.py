@@ -3,9 +3,11 @@ FastAPI application for PDF operations
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.responses import StreamingResponse
-from pdf_utils import add_page_numbers, PageNumberPosition
+from fastapi.responses import StreamingResponse, Response
+from pdf_utils import add_page_numbers, PageNumberPosition, extract_images_from_pdf
 import io
+import zipfile
+import json
 
 
 app = FastAPI(
@@ -82,6 +84,68 @@ async def add_page_numbers_endpoint(
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
 
+@app.post("/extract-images", summary="Extract images from PDF")
+async def extract_images_endpoint(
+    file: UploadFile = File(..., description="PDF file to extract images from")
+):
+    """
+    Extract all images from a PDF document (fast PyPDF extraction).
+
+    **Features:**
+    - Fast extraction using PyPDF
+    - All images converted to PNG format
+    - Provides metadata (page number, dimensions, format)
+    - Returns base64-encoded images for frontend preview and download
+
+    **Returns:**
+    JSON with list of images and metadata. Each image includes:
+    - image_base64: Base64-encoded PNG image data
+    - page: Page number where image appears
+    - index: Unique index for the image
+    - width/height: Image dimensions
+    - format: Output format (PNG)
+    - original_format: Original format in PDF (JPEG, PNG, etc.)
+    """
+    # Validate file type
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    try:
+        # Read file
+        pdf_bytes = await file.read()
+
+        # Extract images
+        images = extract_images_from_pdf(pdf_bytes)
+
+        if not images:
+            return {
+                "total_images": 0,
+                "images": []
+            }
+
+        # Convert to JSON response with base64
+        import base64
+        result = []
+        for img_data in images:
+            result.append({
+                "image_base64": base64.b64encode(img_data['image_bytes']).decode('utf-8'),
+                "page": img_data['page'],
+                "index": img_data['index'],
+                "width": img_data['width'],
+                "height": img_data['height'],
+                "format": img_data['format'],
+                "original_format": img_data.get('original_format', img_data['format'])
+            })
+
+        return {
+            "total_images": len(result),
+            "images": result
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error extracting images: {str(e)}")
+
+
 @app.get("/", summary="API Health Check")
 async def root():
     """Health check endpoint"""
@@ -94,6 +158,11 @@ async def root():
                 "path": "/add-page-numbers",
                 "method": "POST",
                 "description": "Add page numbers to PDF (9 positions available)"
+            },
+            {
+                "path": "/extract-images",
+                "method": "POST",
+                "description": "Extract all images from PDF (fast)"
             }
         ]
     }

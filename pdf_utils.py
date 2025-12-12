@@ -2,11 +2,14 @@
 PDF utilities for page numbering and other operations using ReportLab and PyPDF
 """
 
-from reportlab.pdfgen import canvas
-from reportlab.lib.colors import Color
-from pypdf import PdfReader, PdfWriter
 import io
 from enum import Enum
+from typing import List, Dict
+
+from PIL import Image
+from pypdf import PdfReader, PdfWriter
+from reportlab.lib.colors import Color
+from reportlab.pdfgen import canvas
 
 
 class PageNumberPosition(str, Enum):
@@ -138,3 +141,113 @@ def add_page_numbers(
     output_bytes.seek(0)
 
     return output_bytes.getvalue()
+
+
+def extract_images_from_pdf(pdf_bytes: bytes) -> List[Dict[str, any]]:
+    """
+    Extract all images from a PDF document using PyPDF (fast and lightweight).
+
+    Args:
+        pdf_bytes: PDF file as bytes
+
+    Returns:
+        List of dictionaries containing image data with metadata:
+        [
+            {
+                "image_bytes": bytes (original format or PNG),
+                "page": int (page number, 1-indexed),
+                "index": int (global image index),
+                "width": int,
+                "height": int,
+                "format": str (JPEG, PNG, etc.)
+            }
+        ]
+
+    Example:
+        >>> pdf_bytes = open('input.pdf', 'rb').read()
+        >>> images = extract_images_from_pdf(pdf_bytes)
+        >>> for i, img_data in enumerate(images):
+        ...     with open(f'image_{i}.{img_data["format"].lower()}', 'wb') as f:
+        ...         f.write(img_data['image_bytes'])
+    """
+    # Read the PDF
+    pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
+    images = []
+    global_index = 0
+
+    # Iterate through each page
+    for page_num, page in enumerate(pdf_reader.pages, start=1):
+        # Extract images from the page
+        if '/Resources' in page and '/XObject' in page['/Resources']:
+            xObject = page['/Resources']['/XObject'].get_object()
+
+            for obj_name in xObject:
+                obj = xObject[obj_name]
+
+                # Check if it's an image
+                if obj['/Subtype'] == '/Image':
+                    try:
+                        # Get image properties
+                        width = obj['/Width']
+                        height = obj['/Height']
+
+                        # Try to determine format
+                        if '/Filter' in obj:
+                            filter_type = obj['/Filter']
+                            if filter_type == '/DCTDecode':
+                                img_format = 'JPEG'
+                                ext = 'jpg'
+                            elif filter_type == '/FlateDecode':
+                                img_format = 'PNG'
+                                ext = 'png'
+                            elif filter_type == '/JPXDecode':
+                                img_format = 'JPEG2000'
+                                ext = 'jp2'
+                            else:
+                                img_format = 'PNG'  # Default
+                                ext = 'png'
+                        else:
+                            img_format = 'PNG'
+                            ext = 'png'
+
+                        # Extract image data
+                        img_data = obj.get_data()
+
+                        # Convert to PIL Image and then to PNG for consistency
+                        try:
+                            pil_image = Image.open(io.BytesIO(img_data))
+
+                            # Convert to PNG bytes
+                            img_bytes_io = io.BytesIO()
+                            pil_image.save(img_bytes_io, format='PNG')
+                            img_bytes = img_bytes_io.getvalue()
+
+                            images.append({
+                                "image_bytes": img_bytes,
+                                "page": page_num,
+                                "index": global_index,
+                                "width": pil_image.width,
+                                "height": pil_image.height,
+                                "format": "PNG",
+                                "original_format": img_format
+                            })
+                            global_index += 1
+                        except Exception as e:
+                            # If PIL fails, use raw data
+                            print(f"Warning: Could not convert image to PNG on page {page_num}: {e}")
+                            images.append({
+                                "image_bytes": img_data,
+                                "page": page_num,
+                                "index": global_index,
+                                "width": width,
+                                "height": height,
+                                "format": img_format,
+                                "original_format": img_format
+                            })
+                            global_index += 1
+
+                    except Exception as e:
+                        print(f"Warning: Could not extract image from page {page_num}: {e}")
+                        continue
+
+    return images
