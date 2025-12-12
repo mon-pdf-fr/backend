@@ -1,0 +1,12 @@
+[project]
+name = "docling-api"
+version = "0.1.0"
+description = "Custom PDF to DOCX converter"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "reportlab>=4.0.0",
+    "pypdf>=5.1.0",
+    "fastapi>=0.124.4",
+    "uvicorn[standard]>=0.30.0",
+]
