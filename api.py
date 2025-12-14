@@ -4,16 +4,34 @@ FastAPI application for PDF operations
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import StreamingResponse, Response
-from pdf_utils import add_page_numbers, PageNumberPosition, extract_images_from_pdf
+from fastapi.middleware.cors import CORSMiddleware
+from pdf_utils import (
+    add_page_numbers,
+    PageNumberPosition,
+    extract_images_from_pdf,
+    compress_pdf_all_qualities,
+    CompressionQuality
+)
 import io
 import zipfile
 import json
+import base64
 
 
 app = FastAPI(
     title="Docling API",
     description="PDF manipulation API using open-source tools",
     version="1.0.0"
+)
+
+# Add CORS middleware to allow requests from your Next.js app
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with your actual domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    max_age=3600,
 )
 
 
@@ -146,6 +164,102 @@ async def extract_images_endpoint(
         raise HTTPException(status_code=500, detail=f"Error extracting images: {str(e)}")
 
 
+@app.post("/compress-pdf", summary="Compress PDF to all quality levels")
+async def compress_pdf_endpoint(
+    file: UploadFile = File(..., description="PDF file to compress")
+):
+    """
+    Compress a PDF to all three quality levels using Ghostscript.
+
+    **Features:**
+    - High quality: 150 DPI, ~25% size reduction
+    - Medium quality: 100 DPI, ~45% size reduction
+    - Low quality: 72 DPI, ~65% size reduction
+    - Returns base64-encoded PDFs for all quality levels
+
+    **Returns:**
+    JSON with compressed PDFs in base64 format for each quality level:
+    - originalSize: Original file size in bytes
+    - qualities.high/medium/low: Compressed data with size and ratio
+    """
+    # Validate file type
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    try:
+        # Read file
+        pdf_bytes = await file.read()
+
+        file_size_mb = len(pdf_bytes) / 1024 / 1024
+        print(f"[Compress PDF] Processing {file.filename} ({file_size_mb:.2f}MB)")
+
+        # Compress to all quality levels
+        results = compress_pdf_all_qualities(pdf_bytes)
+
+        # Convert to response format with base64
+        response = {
+            "success": True,
+            "originalSize": results["original_size"],
+            "qualities": {
+                "high": {
+                    "size": results["high"]["size"],
+                    "ratio": results["high"]["ratio"],
+                    "blob": base64.b64encode(results["high"]["compressed_bytes"]).decode('utf-8')
+                },
+                "medium": {
+                    "size": results["medium"]["size"],
+                    "ratio": results["medium"]["ratio"],
+                    "blob": base64.b64encode(results["medium"]["compressed_bytes"]).decode('utf-8')
+                },
+                "low": {
+                    "size": results["low"]["size"],
+                    "ratio": results["low"]["ratio"],
+                    "blob": base64.b64encode(results["low"]["compressed_bytes"]).decode('utf-8')
+                }
+            }
+        }
+
+        print(f"[Compress PDF] Compression complete for {file.filename}")
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Compress PDF] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error compressing PDF: {str(e)}")
+
+
+@app.get("/health/ghostscript", summary="Check Ghostscript availability")
+async def check_ghostscript():
+    """Check if Ghostscript is installed and available"""
+    import subprocess
+    try:
+        result = subprocess.run(['gs', '--version'], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return {
+                "available": True,
+                "version": result.stdout.strip(),
+                "message": "Ghostscript is installed and working"
+            }
+        else:
+            return {
+                "available": False,
+                "error": "Ghostscript command failed",
+                "stderr": result.stderr
+            }
+    except FileNotFoundError:
+        return {
+            "available": False,
+            "error": "Ghostscript not found - compression will not work",
+            "message": "Install Ghostscript or deploy to a platform that supports it"
+        }
+    except Exception as e:
+        return {
+            "available": False,
+            "error": str(e)
+        }
+
+
 @app.get("/", summary="API Health Check")
 async def root():
     """Health check endpoint"""
@@ -163,6 +277,16 @@ async def root():
                 "path": "/extract-images",
                 "method": "POST",
                 "description": "Extract all images from PDF (fast)"
+            },
+            {
+                "path": "/compress-pdf",
+                "method": "POST",
+                "description": "Compress PDF to all quality levels (high, medium, low)"
+            },
+            {
+                "path": "/health/ghostscript",
+                "method": "GET",
+                "description": "Check if Ghostscript is available for compression"
             }
         ]
     }

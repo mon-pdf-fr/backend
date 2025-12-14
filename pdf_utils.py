@@ -3,8 +3,11 @@ PDF utilities for page numbering and other operations using ReportLab and PyPDF
 """
 
 import io
+import subprocess
+import tempfile
+import os
 from enum import Enum
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
@@ -251,3 +254,218 @@ def extract_images_from_pdf(pdf_bytes: bytes) -> List[Dict[str, any]]:
                         continue
 
     return images
+
+
+class CompressionQuality(str, Enum):
+    """Available compression quality levels"""
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+def compress_pdf(
+    pdf_bytes: bytes,
+    quality: CompressionQuality = CompressionQuality.MEDIUM
+) -> Tuple[bytes, int, int]:
+    """
+    Compress a PDF using Ghostscript.
+
+    Args:
+        pdf_bytes: PDF file as bytes
+        quality: Compression quality level (high, medium, low)
+
+    Returns:
+        Tuple of (compressed_pdf_bytes, original_size, compressed_size)
+
+    Raises:
+        RuntimeError: If Ghostscript is not available or compression fails
+    """
+    # Ghostscript quality settings
+    quality_settings = {
+        CompressionQuality.HIGH: '/ebook',      # 150 DPI, good quality
+        CompressionQuality.MEDIUM: '/screen',   # 72 DPI, medium quality
+        CompressionQuality.LOW: '/screen',      # 72 DPI with more aggressive settings
+    }
+
+    dpi_settings = {
+        CompressionQuality.HIGH: '150',
+        CompressionQuality.MEDIUM: '100',
+        CompressionQuality.LOW: '72',
+    }
+
+    original_size = len(pdf_bytes)
+
+    # Create temporary files
+    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as input_file:
+        input_path = input_file.name
+        input_file.write(pdf_bytes)
+
+    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as output_file:
+        output_path = output_file.name
+
+    try:
+        # First check if Ghostscript is available
+        try:
+            gs_check = subprocess.run(['gs', '--version'], capture_output=True, timeout=5)
+            if gs_check.returncode != 0:
+                raise RuntimeError("Ghostscript not available")
+            print(f"[Compress PDF] Ghostscript version: {gs_check.stdout.decode().strip()}")
+        except (subprocess.SubprocessError, FileNotFoundError) as e:
+            raise RuntimeError(f"Ghostscript not installed: {e}")
+
+        # Build Ghostscript command
+        gs_command = [
+            'gs',
+            '-sDEVICE=pdfwrite',
+            '-dCompatibilityLevel=1.4',
+            f'-dPDFSETTINGS={quality_settings[quality]}',
+            '-dNOPAUSE',
+            '-dQUIET',
+            '-dBATCH',
+            '-dDownsampleColorImages=true',
+            f'-dColorImageResolution={dpi_settings[quality]}',
+            '-dDownsampleGrayImages=true',
+            f'-dGrayImageResolution={dpi_settings[quality]}',
+            '-dDownsampleMonoImages=true',
+            f'-dMonoImageResolution={dpi_settings[quality]}',
+            f'-sOutputFile={output_path}',
+            input_path
+        ]
+
+        # Run Ghostscript
+        print(f"[Compress PDF] Running Ghostscript with quality: {quality}")
+        result = subprocess.run(
+            gs_command,
+            capture_output=True,
+            text=True,
+            timeout=55  # 55 second timeout
+        )
+
+        if result.returncode != 0:
+            print(f"[Compress PDF] Ghostscript stderr: {result.stderr}")
+            print(f"[Compress PDF] Ghostscript stdout: {result.stdout}")
+            raise RuntimeError(f"Ghostscript failed with code {result.returncode}: {result.stderr}")
+
+        # Read compressed file
+        with open(output_path, 'rb') as f:
+            compressed_bytes = f.read()
+
+        compressed_size = len(compressed_bytes)
+        print(f"[Compress PDF] Compressed from {original_size / 1024 / 1024:.2f}MB to {compressed_size / 1024 / 1024:.2f}MB")
+
+        return compressed_bytes, original_size, compressed_size
+
+    finally:
+        # Clean up temp files
+        try:
+            os.unlink(input_path)
+        except:
+            pass
+        try:
+            os.unlink(output_path)
+        except:
+            pass
+
+
+def compress_pdf_pypdf(pdf_bytes: bytes) -> Tuple[bytes, int, int]:
+    """
+    Compress a PDF using PyPDF (fallback when Ghostscript is unavailable).
+
+    Args:
+        pdf_bytes: PDF file as bytes
+
+    Returns:
+        Tuple of (compressed_pdf_bytes, original_size, compressed_size)
+    """
+    original_size = len(pdf_bytes)
+
+    # Read and write with PyPDF compression
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+
+    # Copy pages and compress
+    for page in reader.pages:
+        page.compress_content_streams()  # Compress content streams
+        writer.add_page(page)
+
+    # Add compression options
+    writer.add_metadata(reader.metadata)
+
+    # Write to bytes with compression
+    output = io.BytesIO()
+    writer.write(output)
+    compressed_bytes = output.getvalue()
+    compressed_size = len(compressed_bytes)
+
+    print(f"[PyPDF Compress] Compressed from {original_size / 1024 / 1024:.2f}MB to {compressed_size / 1024 / 1024:.2f}MB")
+
+    return compressed_bytes, original_size, compressed_size
+
+
+def compress_pdf_all_qualities(pdf_bytes: bytes) -> Dict[str, Dict[str, any]]:
+    """
+    Compress a PDF to all three quality levels.
+    Uses Ghostscript if available, falls back to PyPDF compression.
+
+    Args:
+        pdf_bytes: PDF file as bytes
+
+    Returns:
+        Dictionary with compression results for each quality:
+        {
+            "high": {"compressed_bytes": bytes, "size": int, "ratio": int},
+            "medium": {"compressed_bytes": bytes, "size": int, "ratio": int},
+            "low": {"compressed_bytes": bytes, "size": int, "ratio": int},
+            "original_size": int
+        }
+    """
+    original_size = len(pdf_bytes)
+    results = {
+        "original_size": original_size
+    }
+
+    # Check if Ghostscript is available
+    ghostscript_available = False
+    try:
+        gs_check = subprocess.run(['gs', '--version'], capture_output=True, timeout=2)
+        ghostscript_available = gs_check.returncode == 0
+        print(f"[Compress PDF] Ghostscript available: {ghostscript_available}")
+    except:
+        print("[Compress PDF] Ghostscript not available, using PyPDF fallback")
+
+    if ghostscript_available:
+        # Use Ghostscript for better compression
+        for quality in [CompressionQuality.HIGH, CompressionQuality.MEDIUM, CompressionQuality.LOW]:
+            try:
+                compressed_bytes, _, compressed_size = compress_pdf(pdf_bytes, quality)
+                ratio = round(((original_size - compressed_size) / original_size) * 100)
+
+                results[quality.value] = {
+                    "compressed_bytes": compressed_bytes,
+                    "size": compressed_size,
+                    "ratio": ratio
+                }
+            except Exception as e:
+                print(f"[Compress PDF] Ghostscript error for {quality.value}: {e}")
+                # Fall back to PyPDF
+                compressed_bytes, _, compressed_size = compress_pdf_pypdf(pdf_bytes)
+                ratio = round(((original_size - compressed_size) / original_size) * 100)
+                results[quality.value] = {
+                    "compressed_bytes": compressed_bytes,
+                    "size": compressed_size,
+                    "ratio": ratio
+                }
+    else:
+        # Use PyPDF fallback for all qualities
+        compressed_bytes, _, compressed_size = compress_pdf_pypdf(pdf_bytes)
+        ratio = round(((original_size - compressed_size) / original_size) * 100)
+
+        # For PyPDF, all qualities return the same result (can't do quality levels without Ghostscript)
+        for quality in [CompressionQuality.HIGH, CompressionQuality.MEDIUM, CompressionQuality.LOW]:
+            results[quality.value] = {
+                "compressed_bytes": compressed_bytes,
+                "size": compressed_size,
+                "ratio": ratio
+            }
+
+    return results

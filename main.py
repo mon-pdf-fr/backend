@@ -3,6 +3,7 @@ Main entry point for running the Docling API server
 """
 
 import uvicorn
+from api import app  # Import app for Vercel
 
 
 if __name__ == "__main__":
